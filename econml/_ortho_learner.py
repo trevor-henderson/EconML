@@ -510,7 +510,7 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
                            "we will disallow passing X, W, and Z by position.", ['X', 'W', 'Z'])
     @BaseCateEstimator._wrap_fit
     def fit(self, Y, T, X=None, W=None, Z=None, *, sample_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference=None):
+            cache_nuisances=False, monte_carlo_iterations=None, inference=None):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -534,8 +534,10 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
-        cache_values: bool, default False
-            Whether to cache inputs and first stage results, which will allow refitting a different final model
+        cache_nuisances: bool, default False
+            Whether to cache the nuisances, which will allow refitting a different final model
+        monte_carlo_iterations: int, optional
+            The number of times to rerun the first stage models to reduce the variance of the nuisances.
         inference: string, :class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of :class:`.BootstrapInference`).
@@ -548,7 +550,21 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
         Y, T, X, W, Z, sample_weight, sample_var, groups = check_input_arrays(
             Y, T, X, W, Z, sample_weight, sample_var, groups)
         self._check_input_dims(Y, T, X, W, Z, sample_weight, sample_var, groups)
-        nuisances, fitted_inds = self._fit_nuisances(Y, T, X, W, Z, sample_weight=sample_weight, groups=groups)
+
+        all_nuisances = []
+        fitted_inds = None
+
+        for _ in range(monte_carlo_iterations or 1):
+            nuisances, new_inds = self._fit_nuisances(Y, T, X, W, Z, sample_weight=sample_weight, groups=groups)
+            all_nuisances.append(nuisances)
+            if fitted_inds is None:
+                fitted_inds = new_inds
+            elif not np.array_equal(fitted_inds, new_inds):
+                raise AttributeError("Different indices were fit by different folds, so they cannot be aggregated")
+
+        # TODO: support different ways to aggregate, like median?
+        nuisances = np.mean(np.array(all_nuisances), axis=0)
+
         self._fit_final(self._subinds_check_none(Y, fitted_inds),
                         self._subinds_check_none(T, fitted_inds),
                         X=self._subinds_check_none(X, fitted_inds),
