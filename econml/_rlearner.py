@@ -286,7 +286,8 @@ class _RLearner(_OrthoLearner):
 
     @_deprecate_positional("X, and should be passed by keyword only. In a future release "
                            "we will disallow passing X and W by position.", ['X', 'W'])
-    def fit(self, Y, T, X=None, W=None, *, sample_weight=None, sample_var=None, groups=None, inference=None):
+    def fit(self, Y, T, X=None, W=None, *, sample_weight=None, sample_var=None, groups=None,
+            cache_values=False, inference=None):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -308,6 +309,8 @@ class _RLearner(_OrthoLearner):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
+        cache_values: bool, default False
+            Whether to cache inputs and first stage results, which will allow refitting a different final model
         inference: string,:class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of:class:`.BootstrapInference`).
@@ -319,7 +322,33 @@ class _RLearner(_OrthoLearner):
         # Replacing fit from _OrthoLearner, to enforce Z=None and improve the docstring
         return super().fit(Y, T, X=X, W=W,
                            sample_weight=sample_weight, sample_var=sample_var, groups=groups,
-                           inference=inference)
+                           cache_values=cache_values, inference=inference)
+
+    def refit(self, model_final):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final: estimator
+            Estimator for fitting the response residuals to the features and treatment residuals
+            Must implement `fit` and `predict` methods. Unlike sklearn estimators the fit methods must
+            take an extra second argument (the treatment residuals). Predict, on the other hand,
+            should just take the features and return the constant marginal effect. More, concretely::
+
+                model_final.fit(X, T_res, Y_res,
+                                sample_weight=sample_weight, sample_var=sample_var)
+                model_final.predict(X)
+
+        Returns
+        -------
+        self : _RLearner
+            This instance
+        """
+
+        return super().refit(_ModelFinal(model_final))
 
     def score(self, Y, T, X=None, W=None):
         """

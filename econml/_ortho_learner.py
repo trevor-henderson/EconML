@@ -25,6 +25,7 @@ Chernozhukov et al. (2017). Double/debiased machine learning for treatment and s
 """
 
 import copy
+from collection import namedtuple
 from warnings import warn
 
 import numpy as np
@@ -185,6 +186,10 @@ def _crossfit(model, folds, *args, **kwargs):
                 scores[it].append(score)
 
     return nuisances, model_list, np.sort(fitted_inds.astype(int)), (scores if calculate_scores else None)
+
+
+CachedValues = namedtuple('_CachedValues', ['nuisances', 'fitted_inds',
+                                            'Y', 'T', 'X', 'W', 'Z', 'sample_weight', 'sample_var'])
 
 
 class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
@@ -504,7 +509,8 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
     @_deprecate_positional("X, W, and Z should be passed by keyword only. In a future release "
                            "we will disallow passing X, W, and Z by position.", ['X', 'W', 'Z'])
     @BaseCateEstimator._wrap_fit
-    def fit(self, Y, T, X=None, W=None, Z=None, *, sample_weight=None, sample_var=None, groups=None, inference=None):
+    def fit(self, Y, T, X=None, W=None, Z=None, *, sample_weight=None, sample_var=None, groups=None,
+            cache_values=False, inference=None):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -528,6 +534,8 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
+        cache_values: bool, default False
+            Whether to cache inputs and first stage results, which will allow refitting a different final model
         inference: string, :class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of :class:`.BootstrapInference`).
@@ -549,6 +557,40 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
                         nuisances=tuple([self._subinds_check_none(nuis, fitted_inds) for nuis in nuisances]),
                         sample_weight=self._subinds_check_none(sample_weight, fitted_inds),
                         sample_var=self._subinds_check_none(sample_var, fitted_inds))
+        self._cached_values = CachedValues(nuisances=nuisances, fitted_inds=fitted_inds,
+                                           Y=Y, T=T, X=X, W=W, Z=Z) if cache_values else None
+        return self
+
+    # TODO: this doesn't currently allow inference, because that is handled by the wrap_fit attribute
+    #       which can't be directly applied here
+    def refit(self, model_final):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final: estimator
+            The final stage model to fit
+
+        Returns
+        -------
+        self : _OrthoLearner
+            This instance
+        """
+        assert self._cached_values, "Refit can only be called if values were cached during the original fit"
+        cached = self._cached_values
+        self._model_final = clone(model_final, safe=False)
+        self._fit_final(self._subinds_check_none(cached.Y, cached.fitted_inds),
+                        self._subinds_check_none(cached.T, cached.fitted_inds),
+                        X=self._subinds_check_none(cached.X, cached.fitted_inds),
+                        W=self._subinds_check_none(cached.W, cached.fitted_inds),
+                        Z=self._subinds_check_none(cached.Z, cached.fitted_inds),
+                        nuisances=tuple([self._subinds_check_none(nuis, cached.fitted_inds)
+                                         for nuis in cached.nuisances]),
+                        sample_weight=self._subinds_check_none(cached.sample_weight, cached.fitted_inds),
+                        sample_var=self._subinds_check_none(cached.sample_var, cached.fitted_inds))
         return self
 
     def _fit_nuisances(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):

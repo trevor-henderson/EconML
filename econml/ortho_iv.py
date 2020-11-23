@@ -148,7 +148,8 @@ class _BaseDMLATEIV(_OrthoLearner):
 
     @_deprecate_positional("W and Z should be passed by keyword only. In a future release "
                            "we will disallow passing W and Z by position.", ['W', 'Z'])
-    def fit(self, Y, T, Z, W=None, *, sample_weight=None, sample_var=None, groups=None, inference=None):
+    def fit(self, Y, T, Z, W=None, *, sample_weight=None, sample_var=None, groups=None,
+            cache_values=False, inference=None):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -170,6 +171,8 @@ class _BaseDMLATEIV(_OrthoLearner):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
+        cache_values: bool, default False
+            Whether to cache inputs and first stage results, which will allow refitting a different final model
         inference: string,:class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of:class:`.BootstrapInference`).
@@ -181,7 +184,22 @@ class _BaseDMLATEIV(_OrthoLearner):
         # Replacing fit from _OrthoLearner, to enforce W=None and improve the docstring
         return super().fit(Y, T, W=W, Z=Z,
                            sample_weight=sample_weight, sample_var=sample_var, groups=groups,
-                           inference=inference)
+                           cache_values=cache_values, inference=inference)
+
+    def refit(self):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Note that because the final model for this class is fixed, there is no benefit to refitting.
+
+        Returns
+        -------
+        self : _BaseDMLATEIV
+            This instance
+        """
+        return super().refit(_BaseDMLATEIVModelFinal())
 
     def score(self, Y, T, Z, W=None):
         """
@@ -512,7 +530,8 @@ class _BaseDMLIV(_OrthoLearner):
 
     @_deprecate_positional("Z and X should be passed by keyword only. In a future release "
                            "we will disallow passing Z and X by position.", ['X', 'Z'])
-    def fit(self, Y, T, Z, X=None, *, sample_weight=None, sample_var=None, groups=None, inference=None):
+    def fit(self, Y, T, Z, X=None, *, sample_weight=None, sample_var=None, groups=None,
+            cache_values=False, inference=None):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -534,6 +553,8 @@ class _BaseDMLIV(_OrthoLearner):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
+        cache_values: bool, default False
+            Whether to cache inputs and first stage results, which will allow refitting a different final model
         inference: string,:class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of:class:`.BootstrapInference`).
@@ -545,7 +566,26 @@ class _BaseDMLIV(_OrthoLearner):
         # Replacing fit from _OrthoLearner, to enforce W=None and improve the docstring
         return super().fit(Y, T, X=X, Z=Z,
                            sample_weight=sample_weight, sample_var=sample_var, groups=groups,
-                           inference=inference)
+                           cache_values=cache_values, inference=inference)
+
+    def refit(self, model_final):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final : estimator
+            final model that at fit time takes as input :math:`(Y-\\E[Y|X])`, :math:`(\\E[T|X,Z]-\\E[T|X])` and X
+            and supports method predict(X) that produces the CATE at X
+
+        Returns
+        -------
+        self : _BaseDMLIV
+            This instance
+        """
+        return super().refit(_BaseDMLIVModelFinal(model_final))
 
     def score(self, Y, T, Z, X=None):
         """
@@ -779,6 +819,36 @@ class DMLIV(_BaseDMLIV):
                          categories=categories,
                          random_state=random_state)
 
+    def refit(self, model_final, featurizer=None, fit_cate_intercept=True):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final : estimator
+            final linear model for predicting :math:`(Y-\\E[Y|X])` from :math:`\\phi(X) \\cdot (\\E[T|X,Z]-\\E[T|X])`
+            Method is incorrect if this model is not linear (e.g. Lasso, ElasticNet, LinearRegression).
+
+        featurizer: :term:`transformer`, optional, default None
+            Must support fit_transform and transform. Used to create composite features in the final CATE regression.
+            It is ignored if X is None. The final CATE will be trained on the outcome of featurizer.fit_transform(X).
+            If featurizer=None, then CATE is trained on X.
+
+        fit_cate_intercept : bool, optional, default True
+            Whether the linear CATE model should have a constant term.
+
+        Returns
+        -------
+        self : DMLIV
+            This instance
+        """
+        return super().refit(_FinalWrapper(model_final,
+                                           fit_cate_intercept=fit_cate_intercept,
+                                           featurizer=featurizer,
+                                           use_weight_trick=False))
+
 
 class NonParamDMLIV(_BaseDMLIV):
     """
@@ -872,6 +942,36 @@ class NonParamDMLIV(_BaseDMLIV):
                          discrete_treatment=discrete_treatment,
                          categories=categories,
                          random_state=random_state)
+
+    def refit(self, model_final, featurizer=None, fit_cate_intercept=True):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final : estimator
+            final linear model for predicting :math:`(Y-\\E[Y|X])` from :math:`\\phi(X) \\cdot (\\E[T|X,Z]-\\E[T|X])`
+            Method is incorrect if this model is not linear (e.g. Lasso, ElasticNet, LinearRegression).
+
+        featurizer: :term:`transformer`, optional, default None
+            Must support fit_transform and transform. Used to create composite features in the final CATE regression.
+            It is ignored if X is None. The final CATE will be trained on the outcome of featurizer.fit_transform(X).
+            If featurizer=None, then CATE is trained on X.
+
+        fit_cate_intercept : bool, optional, default True
+            Whether the linear CATE model should have a constant term.
+
+        Returns
+        -------
+        self : NonParamDMLIV
+            This instance
+        """
+        return super().refit(_FinalWrapper(model_final,
+                                           fit_cate_intercept=fit_cate_intercept,
+                                           featurizer=featurizer,
+                                           use_weight_trick=True))
 
 
 class _BaseDRIVModelFinal:
@@ -1067,7 +1167,8 @@ class _BaseDRIV(_OrthoLearner):
 
     @_deprecate_positional("X, W, and Z should be passed by keyword only. In a future release "
                            "we will disallow passing X, W, and Z by position.", ['X', 'W', 'Z'])
-    def fit(self, Y, T, Z, X=None, W=None, *, sample_weight=None, sample_var=None, groups=None, inference=None):
+    def fit(self, Y, T, Z, X=None, W=None, *, sample_weight=None, sample_var=None, groups=None,
+            cache_values=False, inference=None):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -1091,6 +1192,8 @@ class _BaseDRIV(_OrthoLearner):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
+        cache_values: bool, default False
+            Whether to cache inputs and first stage results, which will allow refitting a different final model
         inference: string,:class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of:class:`.BootstrapInference`).
@@ -1102,7 +1205,59 @@ class _BaseDRIV(_OrthoLearner):
         # Replacing fit from _OrthoLearner, to reorder arguments and improve the docstring
         return super().fit(Y, T, X=X, W=W, Z=Z,
                            sample_weight=sample_weight, sample_var=sample_var, groups=groups,
-                           inference=inference)
+                           cache_values=cache_values, inference=inference)
+
+    def refit(self, model_final,
+              featurizer=None,
+              fit_cate_intercept=True,
+              cov_clip=0.1, opt_reweighted=False,
+              discrete_instrument=False, discrete_treatment=False):
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final : estimator
+            model compatible with the sklearn regression API, used to fit the effect on X
+
+        featurizer : :term:`transformer`, optional, default None
+            Must support fit_transform and transform. Used to create composite features in the final CATE regression.
+            It is ignored if X is None. The final CATE will be trained on the outcome of featurizer.fit_transform(X).
+            If featurizer=None, then CATE is trained on X.
+
+        fit_cate_intercept : bool, optional, default True
+            Whether the linear CATE model should have a constant term.
+
+        cov_clip : float, optional, default 0.1
+            clipping of the covariate for regions with low "overlap", to reduce variance
+
+        opt_reweighted : bool, optional, default False
+            Whether to reweight the samples to minimize variance. If True then
+            model_final.fit must accept sample_weight as a kw argument. If True then
+            assumes the model_final is flexible enough to fit the true CATE model. Otherwise,
+            it method will return a biased projection to the model_final space, biased
+            to give more weight on parts of the feature space where the instrument is strong.
+
+        discrete_instrument: bool, optional, default False
+            Whether the instrument values should be treated as categorical, rather than continuous, quantities
+
+        discrete_treatment: bool, optional, default False
+            Whether the treatment values should be treated as categorical, rather than continuous, quantities
+
+        Returns
+        -------
+        self : _BaseDRIV
+            This instance
+        """
+        return super().refit(_BaseDRIVModelFinal(model_final,
+                                                 featurizer,
+                                                 discrete_treatment,
+                                                 discrete_instrument,
+                                                 fit_cate_intercept,
+                                                 cov_clip,
+                                                 opt_reweighted),)
 
     def score(self, Y, T, Z, X=None, W=None, sample_weight=None):
         """
@@ -1261,6 +1416,46 @@ class _IntentToTreatDRIV(_BaseDRIV):
                          categories=categories,
                          opt_reweighted=opt_reweighted,
                          random_state=random_state)
+
+        """
+        Estimate the counterfactual model using a new final model specification but with cached first stage results.
+
+        In order for this to succeed, ``fit`` must have been called with ``cache_values=True``.
+
+        Parameters
+        ----------
+        model_final : estimator
+            model compatible with the sklearn regression API, used to fit the effect on X
+
+        featurizer : :term:`transformer`, optional, default None
+            Must support fit_transform and transform. Used to create composite features in the final CATE regression.
+            It is ignored if X is None. The final CATE will be trained on the outcome of featurizer.fit_transform(X).
+            If featurizer=None, then CATE is trained on X.
+
+        fit_cate_intercept : bool, optional, default True
+            Whether the linear CATE model should have a constant term.
+
+        cov_clip : float, optional, default 0.1
+            clipping of the covariate for regions with low "overlap", to reduce variance
+
+        opt_reweighted : bool, optional, default False
+            Whether to reweight the samples to minimize variance. If True then
+            model_final.fit must accept sample_weight as a kw argument. If True then
+            assumes the model_final is flexible enough to fit the true CATE model. Otherwise,
+            it method will return a biased projection to the model_final space, biased
+            to give more weight on parts of the feature space where the instrument is strong.
+
+        discrete_instrument: bool, optional, default False
+            Whether the instrument values should be treated as categorical, rather than continuous, quantities
+
+        discrete_treatment: bool, optional, default False
+            Whether the treatment values should be treated as categorical, rather than continuous, quantities
+
+        Returns
+        -------
+        self : _BaseDRIV
+            This instance
+        """
 
 
 class _DummyCATE:
@@ -1470,7 +1665,8 @@ class LinearIntentToTreatDRIV(StatsModelsCateEstimatorMixin, IntentToTreatDRIV):
     # override only so that we can update the docstring to indicate support for `StatsModelsInference`
     @_deprecate_positional("X, W, and Z should be passed by keyword only. In a future release "
                            "we will disallow passing X, W, and Z by position.", ['X', 'W', 'Z'])
-    def fit(self, Y, T, Z, X=None, W=None, *, sample_weight=None, sample_var=None, groups=None, inference='auto'):
+    def fit(self, Y, T, Z, X=None, W=None, *, sample_weight=None, sample_var=None, groups=None,
+            cache_values=False, inference='auto'):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -1494,6 +1690,8 @@ class LinearIntentToTreatDRIV(StatsModelsCateEstimatorMixin, IntentToTreatDRIV):
             All rows corresponding to the same group will be kept together during splitting.
             If groups is not None, the n_splits argument passed to this class's initializer
             must support a 'groups' argument to its split method.
+        cache_values: bool, default False
+            Whether to cache inputs and first stage results, which will allow refitting a different final model
         inference: string,:class:`.Inference` instance, or None
             Method for performing inference.  This estimator supports 'bootstrap'
             (or an instance of:class:`.BootstrapInference`) and 'statsmodels'
@@ -1505,4 +1703,4 @@ class LinearIntentToTreatDRIV(StatsModelsCateEstimatorMixin, IntentToTreatDRIV):
         """
         return super().fit(Y, T, Z=Z, X=X, W=W,
                            sample_weight=sample_weight, sample_var=sample_var, groups=groups,
-                           inference=inference)
+                           cache_values=cache_values, inference=inference)
